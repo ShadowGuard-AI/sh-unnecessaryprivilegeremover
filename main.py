@@ -67,6 +67,7 @@ def load_config(config_file):
     """
     try:
         with open(config_file, 'r') as f:
+            # safe_load can return None for an empty file, and the dict check right after is what turns that into a clean error. Without the check, an empty config would crash later on a get call and read like a code bug instead of a bad input.
             config = yaml.safe_load(f)
             if not isinstance(config, dict):
                 raise PrivilegeRemoverError("Configuration file must contain a dictionary.")
@@ -88,6 +89,7 @@ def find_setuid_setgid_files(root_dir="/"):
     """
     setuid_setgid_files = []
     try:
+        # os.walk does not follow directory symlinks by default, so a setuid binary reached only through a linked folder never appears in this list. os.stat on the files does follow links, so the same binary can appear twice under two real paths and be counted as two files.
         for root, _, files in os.walk(root_dir):
             for file in files:
                 filepath = os.path.join(root, file)
@@ -119,6 +121,7 @@ def monitor_processes(duration):
 
     try:
         while time.time() - start_time < duration:
+            # This is polling, not watching. A process that starts and exits between two passes ten milliseconds apart can be missed, and a file it ran would then count as unused. The window length is the only thing making that gap unlikely, not impossible.
             for proc in psutil.process_iter(['pid', 'name', 'exe']):
                 try:
                     exe = proc.info['exe']
@@ -133,6 +136,7 @@ def monitor_processes(duration):
         logging.error(f"Error during process monitoring: {e}")
     finally:
         logging.info("Process monitoring completed.")
+    # The failed flag matters as much as the set. Main treats a failed monitor the same as an empty one and stops, because deciding a bit is unused from a monitor I could not trust would be the dangerous direction to err in.
     return created_processes, failed
 
 
@@ -156,6 +160,7 @@ def remove_privileges(filepath, dry_run=False):
     """
     try:
         if not dry_run:
+            # I shell out to chmod instead of clearing the bits with os.chmod because chmod a-s expresses exactly the change: setuid and setgid off, every other bit left as it was. Doing it by hand with a mode I read earlier would race any change made since the scan.
             subprocess.run(['chmod', 'a-s', filepath], check=True) # Use subprocess.run with check=True
             logging.info(f"Removed setuid/setgid bits from: {filepath}")
         else:
@@ -194,6 +199,7 @@ def main():
         print("No target root given. Refusing to run.")
         sys.exit(1)
 
+    # Precedence runs command line, then config, then 60. A config value of zero is not skipped by this chain the way a falsy check would skip it, it is picked up and then refused by the validation below, which is the honest outcome for a bad setting.
     if args.monitor_time is not None:
         monitor_time = args.monitor_time
     elif config.get("monitor_seconds") is not None:
@@ -208,6 +214,7 @@ def main():
 
     keep_paths = set()
     for entry in config.get("keep_paths") or []:
+        # I keep both spellings of each keep entry, the raw string and the absolute form, and the candidate test checks both spellings of the candidate too. That is four chances to match, which is deliberate: a keep entry written relative to somewhere else still deserves to win over a removal.
         keep_paths.add(os.path.abspath(str(entry)))
         keep_paths.add(str(entry))
 
@@ -220,6 +227,7 @@ def main():
         monitored_processes, monitor_failed = monitor_processes(monitor_time)
         logging.info(f"Monitored {len(monitored_processes)} unique processes.")
 
+        # No processes seen is treated as a broken monitor, not as proof nothing ran. On any real machine the process list is never empty, so an empty set says the collection failed, and removing bits on that evidence would be wrong.
         if monitor_failed or not monitored_processes:
             logging.error("Monitoring failed or collected no processes. Aborting with no removals.")
             print("Monitoring failed or collected no processes. Aborting with no removals.")
