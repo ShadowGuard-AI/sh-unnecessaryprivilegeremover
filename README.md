@@ -1,5 +1,11 @@
 # sh-UnnecessaryPrivilegeRemover
-Analyzes a Linux system for executables with the setuid or setgid bits set, and automatically removes these bits where they are deemed unnecessary based on observed system behavior and process ancestry. Utilizes `psutil` and `subprocess` to monitor process creation and execution to identify if the elevated privileges are actually being used. - Focused on Tools for automating system hardening and configuration. This category provides utilities for generating secure configuration files (e.g., for web servers, databases, operating systems) from templates based on security best practices and compliance standards. Leverages YAML and templating to create customized hardening guides.
+Analyzes one target directory tree for executables with the setuid or setgid bits set, and removes those bits from files that pass the test below only when --apply is given. The default run is a dry run: it prints the full candidate list and changes nothing. The --dry-run flag remains as an explicit spelling of that default.
+
+The real test, stated plainly: a file keeps its bits when a process with its path was seen running during the monitor window. Nothing about process ancestry or process creation is measured. Warning: short windows strip rarely run helpers, because a helper that runs only at login, on a schedule, or on demand outside the window will not be seen and will be listed as a candidate.
+
+A target root is required, given with --root or by the root key in the config file: a run with neither refuses at exit 1 and scans nothing. When monitoring raises an error or collects zero processes, the run aborts at exit 1 with no removals, in dry run and apply modes alike. Failed removals are counted, the failed paths are named, and a run with any failed removal exits 1 with the failure count as the final line.
+
+The config file is optional, given with --config, and is honoured when present. Documented keys: keep_paths (a list of paths never stripped), root (used when no command line target is given), and monitor_seconds. A config that is named but fails to load exits 1. When no config is present, the run proceeds on command line values and logs that no config is in effect.
 
 ## Install
 `git clone https://github.com/ShadowStrikeHQ/sh-unnecessaryprivilegeremover`
@@ -9,9 +15,11 @@ Analyzes a Linux system for executables with the setuid or setgid bits set, and 
 
 ## Parameters
 - `-h`: Show help message and exit
-- `--config`: Path to the YAML configuration file.
-- `--dry-run`: Perform a dry run without actually removing any privileges.
-- `--monitor-time`: Time in seconds to monitor process creation and execution. Default is 60 seconds.
+- `--root`: Target root directory to scan. Required unless the config sets root.
+- `--config`: Path to the optional YAML configuration file.
+- `--dry-run`: Perform a dry run without actually removing any privileges. This is the default.
+- `--apply`: Actually remove privileges from the listed candidates.
+- `--monitor-time`: Time in seconds to monitor processes. Default is 60 seconds, or monitor_seconds from the config.
 
 ## License
 Copyright (c) ShadowStrikeHQ

@@ -4,7 +4,6 @@ import os
 import subprocess
 import psutil
 import yaml
-import chevron
 import time
 import sys
 
@@ -25,21 +24,32 @@ def setup_argparse():
     )
 
     parser.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Target root directory to scan. Required, unless the config file sets root. A run with no target root refuses and scans nothing."
+    )
+    parser.add_argument(
         "--config",
         type=str,
-        help="Path to the YAML configuration file.",
-        default="config.yaml" # Provide a default value
+        help="Path to the optional YAML configuration file. Honoured keys: keep_paths, root, and monitor_seconds.",
+        default=None
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Perform a dry run without actually removing any privileges."
+        help="Perform a dry run without actually removing any privileges. This is the default; the flag is an explicit spelling of it."
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually remove privileges from the listed candidates. Without this flag the run is a dry run and changes nothing."
     )
     parser.add_argument(
         "--monitor-time",
         type=int,
-        default=60,
-        help="Time in seconds to monitor process creation and execution. Default is 60 seconds."
+        default=None,
+        help="Time in seconds to monitor processes. A file keeps its bits when a process with its path was seen running during the monitor window. Default is 60 seconds, or monitor_seconds from the config."
     )
 
 
@@ -99,10 +109,12 @@ def monitor_processes(duration):
     Args:
         duration (int): The duration in seconds to monitor processes.
     Returns:
-        set: A set of executable paths of processes that were created.
+        tuple: (set of executable paths seen running during the window,
+        True when monitoring raised an error).
     """
     created_processes = set()
     start_time = time.time()
+    failed = False
     logging.info(f"Monitoring processes for {duration} seconds...")
 
     try:
@@ -117,10 +129,11 @@ def monitor_processes(duration):
                     continue
             time.sleep(0.1)  # Check frequently without consuming too much CPU
     except Exception as e:
+        failed = True
         logging.error(f"Error during process monitoring: {e}")
     finally:
         logging.info("Process monitoring completed.")
-    return created_processes
+    return created_processes, failed
 
 
 def check_privilege_usage(filepath, monitored_processes):
@@ -147,10 +160,13 @@ def remove_privileges(filepath, dry_run=False):
             logging.info(f"Removed setuid/setgid bits from: {filepath}")
         else:
             logging.info(f"[Dry Run] Would remove setuid/setgid bits from: {filepath}")
+        return True
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to remove privileges from {filepath}: {e}")
+        return False
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
+        return False
 
 
 def main():
@@ -160,32 +176,93 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
-    try:
-        config = load_config(args.config)
-    except PrivilegeRemoverError as e:
-        logging.error(e)
+    config = {}
+    if args.config:
+        try:
+            config = load_config(args.config)
+        except PrivilegeRemoverError as e:
+            logging.error(e)
+            sys.exit(1)
+    else:
+        logging.info("No config file in effect.")
+
+    # Target root: the command line wins, then the config. A run with
+    # neither refuses plainly and scans nothing.
+    root = args.root or config.get("root")
+    if not root:
+        logging.error("No target root given. Refusing to run.")
+        print("No target root given. Refusing to run.")
         sys.exit(1)
 
-    monitor_time = args.monitor_time
+    if args.monitor_time is not None:
+        monitor_time = args.monitor_time
+    elif config.get("monitor_seconds") is not None:
+        monitor_time = config.get("monitor_seconds")
+    else:
+        monitor_time = 60
 
     # Validate monitor_time
     if not isinstance(monitor_time, int) or monitor_time <= 0:
         logging.error("Monitor time must be a positive integer.")
         sys.exit(1)
-    
+
+    keep_paths = set()
+    for entry in config.get("keep_paths") or []:
+        keep_paths.add(os.path.abspath(str(entry)))
+        keep_paths.add(str(entry))
+
+    apply_mode = bool(args.apply)
+
     try:
-        setuid_setgid_files = find_setuid_setgid_files()
+        setuid_setgid_files = find_setuid_setgid_files(root)
         logging.info(f"Found {len(setuid_setgid_files)} files with setuid/setgid bits set.")
 
-        monitored_processes = monitor_processes(monitor_time)
+        monitored_processes, monitor_failed = monitor_processes(monitor_time)
         logging.info(f"Monitored {len(monitored_processes)} unique processes.")
 
-        for filepath, mode in setuid_setgid_files:
-            if not check_privilege_usage(filepath, monitored_processes):
-                remove_privileges(filepath, args.dry_run)
-            else:
-                logging.info(f"Keeping privileges for: {filepath} (used by monitored processes).")
+        if monitor_failed or not monitored_processes:
+            logging.error("Monitoring failed or collected no processes. Aborting with no removals.")
+            print("Monitoring failed or collected no processes. Aborting with no removals.")
+            sys.exit(1)
 
+        candidates = []
+        for filepath, mode in setuid_setgid_files:
+            if filepath in keep_paths or os.path.abspath(filepath) in keep_paths:
+                logging.info(f"Keeping privileges for: {filepath} (listed in keep_paths).")
+            elif check_privilege_usage(filepath, monitored_processes):
+                logging.info(f"Keeping privileges for: {filepath} (seen running during the monitor window).")
+            else:
+                candidates.append(filepath)
+
+        if apply_mode:
+            print("Removal list:")
+            for filepath in candidates:
+                print(filepath)
+        else:
+            print("Dry run: candidates for privilege removal (nothing will be changed):")
+            for filepath in candidates:
+                print(filepath)
+
+        if not apply_mode:
+            for filepath in candidates:
+                remove_privileges(filepath, dry_run=True)
+            logging.info("Dry run complete. No privileges were removed.")
+            return
+
+        failed_paths = []
+        for filepath in candidates:
+            if not remove_privileges(filepath, dry_run=False):
+                failed_paths.append(filepath)
+
+        if failed_paths:
+            for filepath in failed_paths:
+                print(f"Failed to remove privileges from: {filepath}")
+            print(f"Removal failures: {len(failed_paths)}")
+            logging.error(f"Removal failures: {len(failed_paths)}")
+            sys.exit(1)
+
+    except SystemExit:
+        raise
     except Exception as e:
         logging.error(f"An error occurred: {e}")
         sys.exit(1)
