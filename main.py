@@ -181,6 +181,11 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
+    if args.dry_run and args.apply:
+        logging.error("Conflicting flags: --dry-run and --apply cannot be used together. Refusing to run.")
+        print("Conflicting flags: --dry-run and --apply cannot be used together. Refusing to run.")
+        sys.exit(1)
+
     config = {}
     if args.config:
         try:
@@ -198,6 +203,10 @@ def main():
         logging.error("No target root given. Refusing to run.")
         print("No target root given. Refusing to run.")
         sys.exit(1)
+    if not os.path.isdir(root):
+        logging.error(f"Target root is not an existing directory: {root}. Refusing to run.")
+        print(f"Target root is not an existing directory: {root}. Refusing to run.")
+        sys.exit(1)
 
     # Precedence runs command line, then config, then 60. A config value of zero is not skipped by this chain the way a falsy check would skip it, it is picked up and then refused by the validation below, which is the honest outcome for a bad setting.
     if args.monitor_time is not None:
@@ -208,7 +217,7 @@ def main():
         monitor_time = 60
 
     # Validate monitor_time
-    if not isinstance(monitor_time, int) or monitor_time <= 0:
+    if isinstance(monitor_time, bool) or not isinstance(monitor_time, int) or monitor_time <= 0:
         logging.error("Monitor time must be a positive integer.")
         sys.exit(1)
 
